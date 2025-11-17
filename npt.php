@@ -32,6 +32,13 @@ switch ($command) {
         exit(1);
 }
 
+switch(){
+
+}
+switch () {
+    
+}
+
 /**
  * Команда init:
  * Создаёт пустой data.npt, keys.json, allowlist.json.
