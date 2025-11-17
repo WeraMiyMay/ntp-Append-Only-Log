@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 /*
     npt.php — CLI‑утилита для append‑only лога с подписями.
+
     ШАГ 1: реализована только команда `init`.
 */
 
@@ -31,14 +32,6 @@ switch ($command) {
         fwrite(STDERR, "Неизвестная команда: $command\n");
         exit(1);
 }
-
-switch(){
-
-}
-switch () {
-    
-}
-
 /**
  * Команда init:
  * Создаёт пустой data.npt, keys.json, allowlist.json.
