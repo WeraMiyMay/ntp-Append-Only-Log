@@ -126,33 +126,75 @@ function cmd_write(array $argv): void {
 
 function cmd_generate(array $argv): void {
     $count = null;
-    $randomMode = in_array('--random', $argv, true);
+    $randomMode = false;
+    $templatePath = null;
 
-    foreach ($argv as $i => $a) {
-        if ($a === '--count' && isset($argv[$i + 1])) {
-            $count = (int)$argv[$i + 1];
+    // ---- Разбор аргументов ----
+    for ($i = 0; $i < count($argv); $i++) {
+        if ($argv[$i] === '--count' && isset($argv[$i+1])) {
+            $count = (int)$argv[$i+1];
+        }
+        if ($argv[$i] === '--random') {
+            $randomMode = true;
+        }
+        if ($argv[$i] === '--template' && isset($argv[$i+1])) {
+            $templatePath = $argv[$i+1];
         }
     }
 
     if ($count === null || $count <= 0) {
-        fwrite(STDERR, "Использование: php npt.php generate --count N [--random]\n");
+        fwrite(STDERR, "Использование: php npt.php generate --count N [--template path.json | --random]\n");
         exit(1);
     }
 
+    if ($randomMode && $templatePath !== null) {
+        fwrite(STDERR, "Ошибка: одновременно указаны --random и --template.\n");
+        exit(1);
+    }
+
+    // ---- Загрузка шаблона ----
+    $template = null;
+    if ($templatePath !== null) {
+        if (!file_exists($templatePath)) {
+            fwrite(STDERR, "Ошибка: не найден template: $templatePath\n");
+            exit(1);
+        }
+        $tplRaw = file_get_contents($templatePath);
+        $template = json_decode($tplRaw, true);
+        if (!is_array($template)) {
+            fwrite(STDERR, "Ошибка: template не JSON-объект.\n");
+            exit(1);
+        }
+    }
+
+    // ---- Цикл генерации ----
     for ($i = 0; $i < $count; $i++) {
+        $now = time();
+
         if ($randomMode) {
-            $payload = json_encode([
+            // Полностью случайный валидный payload
+            $payloadArray = [
+                'id'  => $i + 1,
+                'ts'  => $now,
+                'rnd' => bin2hex(random_bytes(8)),
+                'val' => random_int(0, PHP_INT_MAX)
+            ];
+        }
+        elseif ($template !== null) {
+            // + id, ts
+            $payloadArray = $template;
+            $payloadArray['id'] = $i + 1;
+            $payloadArray['ts'] = $now;
+        }
+        else {
+            // Старое поведение
+            $payloadArray = [
                 'id' => $i + 1,
-                'ts' => time(),
-                'rnd'=> bin2hex(random_bytes(4))
-            ], JSON_UNESCAPED_SLASHES);
-        } else {
-            $payload = json_encode([
-                'id' => $i + 1,
-                'ts' => time()
-            ], JSON_UNESCAPED_SLASHES);
+                'ts' => $now
+            ];
         }
 
+        $payload = json_encode($payloadArray, JSON_UNESCAPED_SLASHES);
         write_block($payload);
     }
 
