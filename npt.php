@@ -46,6 +46,10 @@ switch ($command) {
         cmd_generate($argv);
         break;
 
+    case 'read':
+        cmd_read($argv);
+        break;
+        
     default:
         fwrite(STDERR, "Неизвестная команда: $command\n");
         exit(1);
@@ -209,3 +213,101 @@ function get_last_block_hash($fh): string {
     }
     return $h;
 }
+
+/* ============================================================
+ *  read [--from OFFSET] [--limit K] [--hex]
+ * ============================================================ */
+function cmd_read(array $argv): void {
+    $from = 0;
+    $limit = PHP_INT_MAX;
+    $addHex = in_array('--hex', $argv, true);
+
+    for ($i = 0; $i < count($argv); $i++) {
+        if ($argv[$i] === '--from' && isset($argv[$i+1])) {
+            $from = (int)$argv[$i+1];
+        }
+        if ($argv[$i] === '--limit' && isset($argv[$i+1])) {
+            $limit = (int)$argv[$i+1];
+        }
+    }
+
+    $fh = fopen('data.npt', 'rb');
+    if (!$fh) {
+        fwrite(STDERR, "Не открыть data.npt\n");
+        exit(1);
+    }
+
+    fseek($fh, $from);
+
+    $count = 0;
+
+    while (!feof($fh) && $count < $limit) {
+        $pos = ftell($fh);
+        $magic = fread($fh, 6);
+        if ($magic === false || strlen($magic) === 0) break;
+
+        if ($magic !== "NOVIJ1") {
+            fwrite(STDERR, "Ошибка: MAGIC mismatch @ offset $pos\n");
+            break;
+        }
+
+        $LENraw = fread($fh, 4);
+        if ($LENraw === false || strlen($LENraw) !== 4) break;
+
+        $LEN = unpack('N', $LENraw)[1];
+
+        $rest = fread($fh, $LEN);
+        if ($rest === false || strlen($rest) !== $LEN) {
+            fwrite(STDERR, "Ошибка: повреждён блок @ offset $pos\n");
+            break;
+        }
+
+        // Разбор внутрянки
+        $cursor = 0;
+
+        $ts = unpack('J', substr($rest, $cursor, 8))[1];
+        $cursor += 8;
+
+        $prev = substr($rest, $cursor, 32);
+        $cursor += 32;
+
+        $plen = unpack('N', substr($rest, $cursor, 4))[1];
+        $cursor += 4;
+
+        $payload = substr($rest, $cursor, $plen);
+        $cursor += $plen;
+
+        $pub = substr($rest, $cursor, 32);
+        $cursor += 32;
+
+        $sig = substr($rest, $cursor, 64);
+        $cursor += 64;
+
+        // HASH идёт сразу после SIG (но он вне LEN, поэтому читаем отдельно)
+        $hash = fread($fh, 32);
+        if ($hash === false || strlen($hash) !== 32) {
+            fwrite(STDERR, "Ошибка: плохой HASH @ offset $pos\n");
+            break;
+        }
+
+        $out = [
+            'offset' => $pos,
+            'ts'     => $ts,
+            'payload'=> json_decode($payload, true),
+            'pub'    => bin2hex($pub),
+        ];
+
+        if ($addHex) {
+            $out['hash'] = bin2hex($hash);
+            $out['prev'] = bin2hex($prev);
+        }
+
+        echo json_encode($out, JSON_UNESCAPED_SLASHES) . "\n";
+
+        $count++;
+    }
+
+    fclose($fh);
+}
+
+?>
