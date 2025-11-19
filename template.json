@@ -1,5 +1,1 @@
-{
-  "type": "task",
-  "status": "pending",
-  "note": "auto-generated"
-}
+{"type":"event","level":"info","msg":"hello"}

@@ -155,39 +155,73 @@ function cmd_generate(array $argv): void {
     // ---- Загрузка шаблона ----
     $template = null;
     if ($templatePath !== null) {
+
         if (!file_exists($templatePath)) {
             fwrite(STDERR, "Ошибка: не найден template: $templatePath\n");
             exit(1);
         }
+
         $tplRaw = file_get_contents($templatePath);
+        if ($tplRaw === false) {
+            fwrite(STDERR, "Ошибка: невозможно прочитать template.\n");
+            exit(1);
+        }
+
+        // -------- Обработка BOM и кодировок --------
+
+        // Если UTF‑16LE или UTF‑16BE
+        if (substr($tplRaw, 0, 2) === "\xFF\xFE" || substr($tplRaw, 0, 2) === "\xFE\xFF") {
+            $tplRaw = mb_convert_encoding($tplRaw, 'UTF-8', 'UTF-16');
+        }
+
+        // Удаляем UTF‑8 BOM
+        if (substr($tplRaw, 0, 3) === "\xEF\xBB\xBF") {
+            $tplRaw = substr($tplRaw, 3);
+        }
+
+        // Удаляем управляющие символы вне UTF‑8
+        $tplRaw = preg_replace('/[^\x09\x0A\x0D\x20-\x7E\xC2-\xF4][^\x80-\xBF]*/', '', $tplRaw);
+
+        // Трим
+        $tplRaw = trim($tplRaw);
+
+        // -------- Парсинг JSON --------
         $template = json_decode($tplRaw, true);
-        if (!is_array($template)) {
-            fwrite(STDERR, "Ошибка: template не JSON-объект.\n");
+
+        if ($template === null || json_last_error() !== JSON_ERROR_NONE) {
+            fwrite(STDERR, "Ошибка: template невалидный JSON. Причина: " . json_last_error_msg() . "\n");
+            exit(1);
+        }
+
+        // Template должен быть JSON‑объектом { ... }
+        if (!is_array($template) || array_is_list($template)) {
+            fwrite(STDERR, "Ошибка: template должен быть JSON‑объектом { ... }.\n");
             exit(1);
         }
     }
 
-    // ---- Цикл генерации ----
+    // ---- Генерация блоков ----
     for ($i = 0; $i < $count; $i++) {
+
         $now = time();
 
         if ($randomMode) {
-            // Полностью случайный валидный payload
+
             $payloadArray = [
                 'id'  => $i + 1,
                 'ts'  => $now,
                 'rnd' => bin2hex(random_bytes(8)),
                 'val' => random_int(0, PHP_INT_MAX)
             ];
-        }
-        elseif ($template !== null) {
-            // + id, ts
+
+        } elseif ($template !== null) {
+
             $payloadArray = $template;
             $payloadArray['id'] = $i + 1;
             $payloadArray['ts'] = $now;
-        }
-        else {
-            // Старое поведение
+
+        } else {
+
             $payloadArray = [
                 'id' => $i + 1,
                 'ts' => $now
@@ -208,34 +242,30 @@ function read_one_block_and_advance($fh): ?array {
     $pos = ftell($fh);
 
     $magic = fread($fh, 6);
-    if ($magic === false || strlen($magic) === 0) return null; // конец файла
+    if ($magic === false || strlen($magic) === 0) {
+        return null; // EOF
+    }
     if ($magic !== "NOVIJ1") {
-        fwrite(STDERR, "Ошибка: MAGIC mismatch @ offset $pos\n");
-        exit(1);
+        return ['error' => "MAGIC mismatch", 'offset' => $pos];
     }
 
     $LEN_raw = fread($fh, 4);
     if ($LEN_raw === false || strlen($LEN_raw) !== 4) {
-        fwrite(STDERR, "Ошибка: повреждён LEN @ offset $pos\n");
-        exit(1);
+        return ['error' => "bad LEN", 'offset' => $pos];
     }
     $LEN = unpack('N', $LEN_raw)[1];
 
-    // Читаем тело (TS..SIG)
     $body_raw = fread($fh, $LEN);
     if ($body_raw === false || strlen($body_raw) !== $LEN) {
-        fwrite(STDERR, "Ошибка: повреждение блока @ offset $pos\n");
-        exit(1);
+        return ['error' => "body truncated", 'offset' => $pos];
     }
 
-    // После тела — HASH
     $hash = fread($fh, 32);
     if ($hash === false || strlen($hash) !== 32) {
-        fwrite(STDERR, "Ошибка: не хватает HASH @ offset $pos\n");
-        exit(1);
+        return ['error' => "missing HASH", 'offset' => $pos];
     }
 
-    // Парсим тело
+    // ---- Парсинг ----
     $c = 0;
 
     $ts_raw = substr($body_raw, $c, 8);
@@ -273,6 +303,7 @@ function read_one_block_and_advance($fh): ?array {
         'body_raw'    => $body_raw,
     ];
 }
+
 /* ============================================================
  *  write_block — общая функция записи блока
  * ============================================================ */
@@ -326,18 +357,43 @@ function write_block(string $payload): void {
 /* ---------------------- LAST BLOCK HASH --------------------- */
 
 function get_last_block_hash($fh): string {
-    fseek($fh, 0, SEEK_END);
-    $size = ftell($fh);
-    if ($size <= 0) {
-        return str_repeat("\x00", 32);
+    fseek($fh, 0, SEEK_SET);
+
+    $lastHash = str_repeat("\x00", 32);
+
+    while (true) {
+        $pos = ftell($fh);
+        $magic = fread($fh, 6);
+
+        if ($magic === false || strlen($magic) === 0) {
+            break; // конец файла
+        }
+        if ($magic !== "NOVIJ1") {
+            // повреждённый блок => прекращаем
+            break;
+        }
+
+        $LENraw = fread($fh, 4);
+        if ($LENraw === false || strlen($LENraw) !== 4) {
+            break; // обрыв
+        }
+
+        $LEN = unpack('N', $LENraw)[1];
+        $body = fread($fh, $LEN);
+        if ($body === false || strlen($body) !== $LEN) {
+            break; // обрыв
+        }
+
+        $hash = fread($fh, 32);
+        if ($hash === false || strlen($hash) !== 32) {
+            break; // обрыв
+        }
+
+        // если дошли сюда — блок корректный
+        $lastHash = $hash;
     }
 
-    fseek($fh, -32, SEEK_END);
-    $h = fread($fh, 32);
-    if ($h === false || strlen($h) !== 32) {
-        return str_repeat("\x00", 32);
-    }
-    return $h;
+    return $lastHash;
 }
 
 /* ============================================================
@@ -460,6 +516,10 @@ function cmd_verify(): void {
         $pos = ftell($fh);
         $block = read_one_block_and_advance($fh);
         if ($block === null) break; // окончен файл
+        if (isset($block['error'])) {
+    fwrite(STDERR, "Ошибка структуры @ offset {$block['offset']}: {$block['error']}\n");
+    exit(1);
+}
 
         // 1) MAGIC проверен внутри read_one_block
         // 2) LEN проверен внутри read_one_block
@@ -514,6 +574,11 @@ function cmd_export(): void {
     while (true) {
         $block = read_one_block_and_advance($fh);
         if ($block === null) break;
+
+if (isset($block['error'])) {
+    // тихо прекращаем чтение
+    break;
+}
 
         $out = [
             'offset'  => $block['offset'],
@@ -591,6 +656,11 @@ function cmd_search(array $argv): void {
     while (true) {
         $block = read_one_block_and_advance($fh);
         if ($block === null) break;
+
+if (isset($block['error'])) {
+    // тихо прекращаем чтение
+    break;
+}
 
         $jsonRaw = $block['payload_raw'];
         $pubHex  = bin2hex($block['pub']);
