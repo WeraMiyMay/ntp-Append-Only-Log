@@ -53,6 +53,14 @@ switch ($command) {
     case 'verify':
         cmd_verify();
         break;
+    
+    case 'export':
+        cmd_export();
+        break;
+
+    case 'search':
+        cmd_search($argv);
+        break;    
 
     default:
         fwrite(STDERR, "Неизвестная команда: $command\n");
@@ -449,5 +457,138 @@ function cmd_verify(): void {
 
     fclose($fh);
     fwrite(STDOUT, "OK: проверено блоков = $index\n");
+}
+
+/* ============================================================
+ *  export — экспорт всего лога в NDJSON
+ * ============================================================ */
+function cmd_export(): void {
+    $fh = fopen('data.npt', 'rb');
+    if (!$fh) {
+        fwrite(STDERR, "Не открыть data.npt\n");
+        exit(1);
+    }
+
+    while (true) {
+        $block = read_one_block_and_advance($fh);
+        if ($block === null) break;
+
+        $out = [
+            'offset'  => $block['offset'],
+            'ts'      => $block['ts'],
+            'payload' => $block['payload'],
+            'pub'     => bin2hex($block['pub']),
+            'hash'    => bin2hex($block['hash']),
+            'prev'    => bin2hex($block['prev']),
+        ];
+
+        echo json_encode($out, JSON_UNESCAPED_SLASHES) . "\n";
+    }
+
+    fclose($fh);
+}
+/* ============================================================
+ *  search — фильтрация блоков
+ * ============================================================ */
+function cmd_search(array $argv): void {
+    $q = null;          // substring
+    $fieldKey = null;   // key
+    $fieldValue = null; // value (строка/число/bool)
+    $since = null;
+    $until = null;
+    $pubFilter = null;  // hex
+
+    // --- разбор аргументов ---
+    for ($i = 0; $i < count($argv); $i++) {
+
+        if ($argv[$i] === '--q' && isset($argv[$i+1])) {
+            $q = $argv[$i+1];
+        }
+
+        if ($argv[$i] === '--field' && isset($argv[$i+1])) {
+            $pair = $argv[$i+1];
+            $eqPos = strpos($pair, '=');
+            if ($eqPos === false) {
+                fwrite(STDERR, "Ошибка: --field key=value\n");
+                exit(1);
+            }
+            $fieldKey = substr($pair, 0, $eqPos);
+            $rawVal = substr($pair, $eqPos + 1);
+
+            // auto‑type: число, true/false, строка
+            if (is_numeric($rawVal)) {
+                $fieldValue = $rawVal + 0;
+            } elseif ($rawVal === 'true') {
+                $fieldValue = true;
+            } elseif ($rawVal === 'false') {
+                $fieldValue = false;
+            } else {
+                $fieldValue = $rawVal;
+            }
+        }
+
+        if ($argv[$i] === '--since' && isset($argv[$i+1])) {
+            $since = (int)$argv[$i+1];
+        }
+
+        if ($argv[$i] === '--until' && isset($argv[$i+1])) {
+            $until = (int)$argv[$i+1];
+        }
+
+        if ($argv[$i] === '--pub' && isset($argv[$i+1])) {
+            $pubFilter = strtolower($argv[$i+1]);
+        }
+    }
+
+    $fh = fopen('data.npt', 'rb');
+    if (!$fh) {
+        fwrite(STDERR, "Не открыть data.npt\n");
+        exit(1);
+    }
+
+    while (true) {
+        $block = read_one_block_and_advance($fh);
+        if ($block === null) break;
+
+        $jsonRaw = $block['payload_raw'];
+        $pubHex  = bin2hex($block['pub']);
+        $ts      = $block['ts'];
+        $payload = $block['payload'];
+
+        // --- фильтры ---
+        // substring
+        if ($q !== null && strpos($jsonRaw, $q) === false) {
+            continue;
+        }
+
+        // field filter
+        if ($fieldKey !== null) {
+            if (!array_key_exists($fieldKey, $payload)) {
+                continue;
+            }
+            if ($payload[$fieldKey] !== $fieldValue) {
+                continue;
+            }
+        }
+
+        // time filters
+        if ($since !== null && $ts < $since) continue;
+        if ($until !== null && $ts > $until) continue;
+
+        // pub filter
+        if ($pubFilter !== null && strtolower($pubHex) !== $pubFilter) continue;
+
+        // --- вывод результата ---
+        $out = [
+            'offset'  => $block['offset'],
+            'ts'      => $ts,
+            'payload' => $payload,
+            'pub'     => $pubHex,
+        ];
+
+        echo json_encode($out, JSON_UNESCAPED_SLASHES) . "\n";
+    }
+
+    fclose($fh);
 }
 ?>
