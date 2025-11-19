@@ -49,7 +49,11 @@ switch ($command) {
     case 'read':
         cmd_read($argv);
         break;
-        
+
+    case 'verify':
+        cmd_verify();
+        break;
+
     default:
         fwrite(STDERR, "Неизвестная команда: $command\n");
         exit(1);
@@ -146,7 +150,79 @@ function cmd_generate(array $argv): void {
 
     fwrite(STDOUT, "Сгенерировано: $count\n");
 }
+/* ============================================================
+ *  read_one_block_and_advance($fh)
+ *  Возвращает массив полей или null в конце файла.
+ * ============================================================ */
+function read_one_block_and_advance($fh): ?array {
+    $pos = ftell($fh);
 
+    $magic = fread($fh, 6);
+    if ($magic === false || strlen($magic) === 0) return null; // конец файла
+    if ($magic !== "NOVIJ1") {
+        fwrite(STDERR, "Ошибка: MAGIC mismatch @ offset $pos\n");
+        exit(1);
+    }
+
+    $LEN_raw = fread($fh, 4);
+    if ($LEN_raw === false || strlen($LEN_raw) !== 4) {
+        fwrite(STDERR, "Ошибка: повреждён LEN @ offset $pos\n");
+        exit(1);
+    }
+    $LEN = unpack('N', $LEN_raw)[1];
+
+    // Читаем тело (TS..SIG)
+    $body_raw = fread($fh, $LEN);
+    if ($body_raw === false || strlen($body_raw) !== $LEN) {
+        fwrite(STDERR, "Ошибка: повреждение блока @ offset $pos\n");
+        exit(1);
+    }
+
+    // После тела — HASH
+    $hash = fread($fh, 32);
+    if ($hash === false || strlen($hash) !== 32) {
+        fwrite(STDERR, "Ошибка: не хватает HASH @ offset $pos\n");
+        exit(1);
+    }
+
+    // Парсим тело
+    $c = 0;
+
+    $ts_raw = substr($body_raw, $c, 8);
+    $ts = unpack('J', $ts_raw)[1];
+    $c += 8;
+
+    $prev = substr($body_raw, $c, 32);
+    $c += 32;
+
+    $plen = unpack('N', substr($body_raw, $c, 4))[1];
+    $c += 4;
+
+    $payload_raw = substr($body_raw, $c, $plen);
+    $payload = json_decode($payload_raw, true);
+    $c += $plen;
+
+    $pub = substr($body_raw, $c, 32);
+    $c += 32;
+
+    $sig = substr($body_raw, $c, 64);
+    $c += 64;
+
+    return [
+        'offset'      => $pos,
+        'ts'          => $ts,
+        'ts_raw'      => $ts_raw,
+        'prev'        => $prev,
+        'payload'     => $payload,
+        'payload_raw' => $payload_raw,
+        'pub'         => $pub,
+        'sig'         => $sig,
+        'hash'        => $hash,
+
+        'LEN_raw'     => $LEN_raw,
+        'body_raw'    => $body_raw,
+    ];
+}
 /* ============================================================
  *  write_block — общая функция записи блока
  * ============================================================ */
@@ -310,4 +386,68 @@ function cmd_read(array $argv): void {
     fclose($fh);
 }
 
+/* ============================================================
+ *  verify — полный проход по всему файлу
+ * ============================================================ */
+function cmd_verify(): void {
+    if (!file_exists('allowlist.json')) {
+        fwrite(STDERR, "Нет allowlist.json — выполните init.\n");
+        exit(1);
+    }
+    $allow = json_decode(file_get_contents('allowlist.json'), true);
+
+    $fh = fopen('data.npt', 'rb');
+    if (!$fh) {
+        fwrite(STDERR, "Не открыть data.npt\n");
+        exit(1);
+    }
+
+    $expectedPrev = str_repeat("\x00", 32);
+    $offset = 0;
+    $index = 0;
+
+    while (true) {
+        $pos = ftell($fh);
+        $block = read_one_block_and_advance($fh);
+        if ($block === null) break; // окончен файл
+
+        // 1) MAGIC проверен внутри read_one_block
+        // 2) LEN проверен внутри read_one_block
+
+        // 3) Проверка PREV:
+        if ($block['prev'] !== $expectedPrev) {
+            fwrite(STDERR, "Ошибка PREV @ offset $pos (block $index)\n");
+            fwrite(STDERR, "Ожидалось: ".bin2hex($expectedPrev)."\n");
+            fwrite(STDERR, "Получено: ".bin2hex($block['prev'])."\n");
+            exit(1);
+        }
+
+        // 4) Проверка подписи
+        $toSign = hash('sha256', $block['ts_raw'] . $block['prev'] . $block['payload_raw'], true);
+        if (!sodium_crypto_sign_verify_detached($block['sig'], $toSign, $block['pub'])) {
+            fwrite(STDERR, "Ошибка SIG @ offset $pos (block $index)\n");
+            exit(1);
+        }
+
+        // 5) Проверка allowlist
+        if (!in_array(bin2hex($block['pub']), $allow, true)) {
+            fwrite(STDERR, "Ошибка: ключ ".bin2hex($block['pub'])." не в allowlist @ block $index\n");
+            exit(1);
+        }
+
+        // 6) Проверка HASH
+        $calcHash = hash('sha256', $block['LEN_raw'] . $block['body_raw'], true);
+        if ($calcHash !== $block['hash']) {
+            fwrite(STDERR, "Ошибка HASH @ offset $pos (block $index)\n");
+            exit(1);
+        }
+
+        // Формируем expectedPrev для следующего блока
+        $expectedPrev = $block['hash'];
+        $index++;
+    }
+
+    fclose($fh);
+    fwrite(STDOUT, "OK: проверено блоков = $index\n");
+}
 ?>
