@@ -2,16 +2,6 @@
 <?php
 declare(strict_types=1);
 
-/*
-    npt.php — CLI для append-only лога.
-
-    Сейчас реализовано:
-        init
-        write --stdin
-        generate --count N [--random]
-
-*/
-
 if (!extension_loaded('sodium')) {
     fwrite(STDERR, "Ошибка: требуется ext-sodium.\n");
     exit(1);
